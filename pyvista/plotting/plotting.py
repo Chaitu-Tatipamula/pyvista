@@ -68,6 +68,7 @@ from .mapper import (
     OpenGLGPUVolumeRayCastMapper,
     PointGaussianMapper,
     SmartVolumeMapper,
+    UnstructuredGridVolumeRayCastMapper,
 )
 from .picking import PickingHelper
 from .render_window_interactor import RenderWindowInteractor
@@ -154,7 +155,10 @@ def _warn_xserver():  # pragma: no cover
 
 @abstract_class
 class BasePlotter(PickingHelper, WidgetHelper):
-    """To be used by the Plotter and pyvistaqt.QtInteractor classes.
+    """Base plotting class.
+
+    To be used by the :class:`pyvista.Plotter` and
+    :class:`pyvistaqt.QtInteractor` classes.
 
     Parameters
     ----------
@@ -162,38 +166,46 @@ class BasePlotter(PickingHelper, WidgetHelper):
         Number of sub-render windows inside of the main window.
         Specify two across with ``shape=(2, 1)`` and a two by two grid
         with ``shape=(2, 2)``.  By default there is only one renderer.
-        Can also accept a string descriptor as shape. E.g.:
+        Can also accept a string descriptor as shape. For example:
 
-            * ``shape="3|1"`` means 3 plots on the left and 1 on the right,
-            * ``shape="4/2"`` means 4 plots on top and 2 at the bottom.
+        * ``shape="3|1"`` means 3 plots on the left and 1 on the right,
+        * ``shape="4/2"`` means 4 plots on top and 2 at the bottom.
 
     border : bool, optional
         Draw a border around each render window.  Default ``False``.
 
-    border_color : ColorLike, optional
+    border_color : ColorLike, default: 'k'
         Either a string, rgb list, or hex color string.  For example:
 
-            * ``color='white'``
-            * ``color='w'``
-            * ``color=[1.0, 1.0, 1.0]``
-            * ``color='#FFFFFF'``
+        * ``color='white'``
+        * ``color='w'``
+        * ``color=[1.0, 1.0, 1.0]``
+        * ``color='#FFFFFF'``
 
-    border_width : float, optional
+    border_width : float, default: 2.0
         Width of the border in pixels when enabled.
 
     title : str, optional
-        Window title of the scalar bar
+        Window title.
 
-    lighting : str, optional
-        What lighting to set up for the plotter.
-        Accepted options:
+    splitting_position : float, optional
+        The splitting position of the renderers.
 
-            * ``'light_kit'``: a vtk Light Kit composed of 5 lights.
-            * ``'three lights'``: illumination using 3 lights.
-            * ``'none'``: no light sources at instantiation.
+    groups : tuple, optional
+        Grouping for renderers.
 
-        The default is a Light Kit (to be precise, 5 separate lights
-        that act like a Light Kit).
+    row_weights : tuple
+        Row weights for renderers.
+
+    col_weights : tuple, optional
+        Column weights for renderers.
+
+    lighting : str, default: 'light kit'
+        What lighting to set up for the plotter.  Accepted options:
+
+        * ``'light_kit'``: a vtk Light Kit composed of 5 lights.
+        * ``'three lights'``: illumination using 3 lights.
+        * ``'none'``: no light sources at instantiation.
 
     theme : pyvista.themes.DefaultTheme, optional
         Plot-specific theme.
@@ -201,6 +213,20 @@ class BasePlotter(PickingHelper, WidgetHelper):
     image_scale : int, optional
         Scale factor when saving screenshots. Image sizes will be
         the ``window_size`` multiplied by this scale factor.
+
+    **kwargs : dict, optional
+        Additional keyword arguments.
+
+    Examples
+    --------
+    Simple plotter example showing a blurred cube with a gradient background.
+
+    >>> import pyvista as pv
+    >>> pl = pv.Plotter()
+    >>> _ = pl.add_mesh(pv.Cube())
+    >>> pl.set_background('black', top='white')
+    >>> pl.add_blurring()
+    >>> pl.show()
 
     """
 
@@ -1198,6 +1224,11 @@ class BasePlotter(PickingHelper, WidgetHelper):
         """Wrap ``Renderer.remove_chart``."""
         return self.renderer.remove_chart(*args, **kwargs)
 
+    @wraps(Renderers.set_chart_interaction)
+    def set_chart_interaction(self, *args, **kwargs):
+        """Wrap ``Renderers.set_chart_interaction``."""
+        return self.renderers.set_chart_interaction(*args, **kwargs)
+
     @wraps(Renderer.add_actor)
     def add_actor(self, *args, **kwargs):
         """Wrap ``Renderer.add_actor``."""
@@ -1427,10 +1458,10 @@ class BasePlotter(PickingHelper, WidgetHelper):
     @property
     def camera(self):
         """Return the active camera of the active renderer."""
-        if not self.camera_set:
+        if not self.renderer.camera.is_set:
             self.camera_position = self.get_default_cam_pos()
             self.reset_camera()
-            self.camera_set = True
+            self.renderer.camera.is_set = True
         return self.renderer.camera
 
     @camera.setter
@@ -1441,12 +1472,12 @@ class BasePlotter(PickingHelper, WidgetHelper):
     @property
     def camera_set(self):
         """Return if the camera of the active renderer has been set."""
-        return self.renderer.camera_set
+        return self.renderer.camera.is_set
 
     @camera_set.setter
     def camera_set(self, is_set):
         """Set if the camera has been set on the active renderer."""
-        self.renderer.camera_set = is_set
+        self.renderer.camera.is_set = is_set
 
     @property
     def bounds(self) -> BoundsLike:
@@ -1640,11 +1671,13 @@ class BasePlotter(PickingHelper, WidgetHelper):
         size_before = self.window_size
         if window_size is not None:
             self.window_size = window_size
-        yield self
-        # Sometimes the render window is destroyed within the context
-        # and re-setting will fail
-        if self.render_window is not None:
-            self.window_size = size_before
+        try:
+            yield self
+        finally:
+            # Sometimes the render window is destroyed within the context
+            # and re-setting will fail
+            if self.render_window is not None:
+                self.window_size = size_before
 
     @property
     def image_depth(self):
@@ -1736,8 +1769,10 @@ class BasePlotter(PickingHelper, WidgetHelper):
         scale_before = self.image_scale
         if scale is not None:
             self.image_scale = scale
-        yield self
-        self.image_scale = scale_before
+        try:
+            yield self
+        finally:
+            self.image_scale = scale_before
 
     def render(self):
         """Render the main window.
@@ -2147,7 +2182,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
         clim=None,
         show_edges=None,
         edge_color=None,
-        point_size=5.0,
+        point_size=None,
         line_width=None,
         opacity=1.0,
         flip_scalars=False,
@@ -2162,13 +2197,13 @@ class BasePlotter(PickingHelper, WidgetHelper):
         multi_colors=False,
         name=None,
         render_points_as_spheres=None,
-        render_lines_as_tubes=False,
+        render_lines_as_tubes=None,
         smooth_shading=None,
         split_sharp_edges=None,
-        ambient=0.0,
-        diffuse=1.0,
-        specular=0.0,
-        specular_power=100.0,
+        ambient=None,
+        diffuse=None,
+        specular=None,
+        specular_power=None,
         nan_color=None,
         nan_opacity=1.0,
         culling=None,
@@ -2180,14 +2215,14 @@ class BasePlotter(PickingHelper, WidgetHelper):
         pickable=True,
         preference="point",
         log_scale=False,
-        pbr=False,
-        metallic=0.0,
-        roughness=0.5,
+        pbr=None,
+        metallic=None,
+        roughness=None,
         render=True,
         component=None,
         color_missing_with_nan=False,
         copy_mesh=False,
-        show_vertices=False,
+        show_vertices=None,
         **kwargs,
     ):
         """Add a composite dataset to the plotter.
@@ -2443,7 +2478,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
             have these updates rendered, e.g. by changing the active scalars or
             through an interactive widget.  Defaults to ``False``.
 
-        show_vertices : bool, default: False
+        show_vertices : bool, optional
             When ``style`` is not ``'points'``, render the external surface
             vertices. The following optional keyword arguments may be used to
             control the style of the vertices:
@@ -2533,6 +2568,8 @@ class BasePlotter(PickingHelper, WidgetHelper):
             style,
             **kwargs,
         )
+        if show_vertices is None:
+            show_vertices = self._theme.show_vertices
 
         # Compute surface normals if using smooth shading
         if smooth_shading:
@@ -2645,6 +2682,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
                 opacity=vertex_opacity,
                 lighting=lighting,
                 render=False,
+                show_vertices=False,
             )
 
         self.add_actor(
@@ -2667,13 +2705,13 @@ class BasePlotter(PickingHelper, WidgetHelper):
         clim=None,
         show_edges=None,
         edge_color=None,
-        point_size=5.0,
+        point_size=None,
         line_width=None,
-        opacity=1.0,
+        opacity=None,
         flip_scalars=False,
         lighting=None,
         n_colors=256,
-        interpolate_before_map=True,
+        interpolate_before_map=None,
         cmap=None,
         label=None,
         reset_camera=None,
@@ -2683,19 +2721,19 @@ class BasePlotter(PickingHelper, WidgetHelper):
         name=None,
         texture=None,
         render_points_as_spheres=None,
-        render_lines_as_tubes=False,
+        render_lines_as_tubes=None,
         smooth_shading=None,
         split_sharp_edges=None,
-        ambient=0.0,
-        diffuse=1.0,
-        specular=0.0,
-        specular_power=100.0,
+        ambient=None,
+        diffuse=None,
+        specular=None,
+        specular_power=None,
         nan_color=None,
         nan_opacity=1.0,
         culling=None,
         rgb=None,
         categories=False,
-        silhouette=False,
+        silhouette=None,
         use_transparency=False,
         below_color=None,
         above_color=None,
@@ -2703,15 +2741,15 @@ class BasePlotter(PickingHelper, WidgetHelper):
         pickable=True,
         preference="point",
         log_scale=False,
-        pbr=False,
-        metallic=0.0,
-        roughness=0.5,
+        pbr=None,
+        metallic=None,
+        roughness=None,
         render=True,
         component=None,
-        emissive=False,
+        emissive=None,
         copy_mesh=False,
         backface_params=None,
-        show_vertices=False,
+        show_vertices=None,
         **kwargs,
     ):
         """Add any PyVista/VTK mesh or dataset that PyVista can wrap to the scene.
@@ -3002,7 +3040,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
             nonnegative, if supplied. If ``None``, the magnitude of
             the vector is plotted.
 
-        emissive : bool, default: False
+        emissive : bool, optional
             Treat the points/splats as emissive light sources. Only valid for
             ``style='points_gaussian'`` representation.
 
@@ -3028,7 +3066,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
             ``backface_params=None``) default to the corresponding frontface
             properties.
 
-        show_vertices : bool, default: False
+        show_vertices : bool, optional
             When ``style`` is not ``'points'``, render the external surface
             vertices. The following optional keyword arguments may be used to
             control the style of the vertices:
@@ -3109,7 +3147,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
 
         """
         if style == 'points_gaussian':
-            self.mapper = PointGaussianMapper(theme=self.theme)
+            self.mapper = PointGaussianMapper(theme=self.theme, emissive=emissive)
         else:
             self.mapper = DataSetMapper(theme=self.theme)
 
@@ -3178,6 +3216,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
                 metallic=metallic,
                 roughness=roughness,
                 render=render,
+                show_vertices=show_vertices,
                 **kwargs,
             )
         elif copy_mesh and algo is None:
@@ -3230,6 +3269,11 @@ class BasePlotter(PickingHelper, WidgetHelper):
             **kwargs,
         )
 
+        if show_vertices is None:
+            show_vertices = self._theme.show_vertices
+
+        if silhouette is None:
+            silhouette = self._theme.silhouette.enabled
         if silhouette:
             if isinstance(silhouette, dict):
                 self.add_silhouette(algo or mesh, **silhouette)
@@ -3307,7 +3351,8 @@ class BasePlotter(PickingHelper, WidgetHelper):
         # set main values
         self.mesh = mesh
         self.mapper.dataset = self.mesh
-        self.mapper.interpolate_before_map = interpolate_before_map
+        if interpolate_before_map is not None:
+            self.mapper.interpolate_before_map = interpolate_before_map
         set_algorithm_input(self.mapper, algo or mesh)
 
         actor = Actor(mapper=self.mapper)
@@ -3316,7 +3361,6 @@ class BasePlotter(PickingHelper, WidgetHelper):
             texture = mesh._activate_texture(texture)
 
         if texture:
-
             if isinstance(texture, np.ndarray):
                 texture = numpy_to_texture(texture)
             if not isinstance(texture, (_vtk.vtkTexture, _vtk.vtkOpenGLTexture)):
@@ -3396,21 +3440,20 @@ class BasePlotter(PickingHelper, WidgetHelper):
             culling=culling,
         )
 
-        if style == 'points_gaussian':
-            self.mapper.emissive = emissive
-            self.mapper.scale_factor = point_size * self.mapper.dataset.length / 1300
-            if not render_points_as_spheres and not emissive:
-                if opacity >= 1.0:
-                    opacity = 0.9999  # otherwise, weird triangles
-
         if isinstance(opacity, (float, int)):
             prop_kwargs['opacity'] = opacity
         prop = Property(**prop_kwargs)
         actor.SetProperty(prop)
 
+        if style == 'points_gaussian':
+            self.mapper.scale_factor = prop.point_size * self.mapper.dataset.length / 1300
+            if not render_points_as_spheres and not self.mapper.emissive:
+                if prop.opacity >= 1.0:
+                    prop.opacity = 0.9999  # otherwise, weird triangles
+
         if render_points_as_spheres:
             if style == 'points_gaussian':
-                self.mapper.use_circular_splat(opacity)
+                self.mapper.use_circular_splat(prop.opacity)
                 prop.opacity = 1.0
             else:
                 prop.render_points_as_spheres = render_points_as_spheres
@@ -3451,6 +3494,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
                 opacity=vertex_opacity,
                 lighting=lighting,
                 render=False,
+                show_vertices=False,
             )
 
         self.add_actor(
@@ -3498,7 +3542,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
         flip_scalars=False,
         reset_camera=None,
         name=None,
-        ambient=0.0,
+        ambient=None,
         categories=False,
         culling=False,
         multi_colors=False,
@@ -3511,20 +3555,27 @@ class BasePlotter(PickingHelper, WidgetHelper):
         preference="point",
         opacity_unit_distance=None,
         shade=False,
-        diffuse=0.7,
-        specular=0.2,
-        specular_power=10.0,
+        diffuse=0.7,  # TODO: different default for volumes
+        specular=0.2,  # TODO: different default for volumes
+        specular_power=10.0,  # TODO: different default for volumes
         render=True,
         **kwargs,
     ):
         """Add a volume, rendered using a smart mapper by default.
 
-        Requires a 3D :class:`numpy.ndarray` or :class:`pyvista.UniformGrid`.
+        Requires a 3D data type like :class:`numpy.ndarray`,
+        :class:`pyvista.UniformGrid`, :class:`pyvista.RectilinearGrid`,
+        or :class:`pyvista.UnstructuredGrid`.
 
         Parameters
         ----------
-        volume : 3D numpy.ndarray or pyvista.UniformGrid or pyvista.RectilinearGrid
+        volume : 3D numpy.ndarray or pyvista.DataSet
             The input volume to visualize. 3D numpy arrays are accepted.
+
+            .. warning::
+                If the input is not :class:`numpy.ndarray`,
+                :class:`pyvista.UniformGrid`, or :class:`pyvista.RectilinearGrid`,
+                volume rendering will often have poor performance.
 
         scalars : str or numpy.ndarray, optional
             Scalars used to "color" the mesh.  Accepts a string name of an
@@ -3635,6 +3686,11 @@ class BasePlotter(PickingHelper, WidgetHelper):
             only ``UniformGrid`` types can be used.
 
             .. note::
+                If a :class:`pyvista.UnstructuredGrid` is input, the 'ugrid'
+                mapper (``vtkUnstructuredGridVolumeRayCastMapper``) will be
+                used regardless.
+
+            .. note::
                 The ``'smart'`` mapper chooses one of the other listed
                 mappers based on rendering parameters and available
                 hardware. Most of the time the ``'smart'`` simply checks
@@ -3743,6 +3799,16 @@ class BasePlotter(PickingHelper, WidgetHelper):
         >>> vol.prop.interpolation_type = 'linear'
         >>> pl.show()
 
+        Plot an UnstructuredGrid.
+
+        >>> from pyvista import examples
+        >>> import pyvista as pv
+        >>> mesh = examples.download_letter_a()
+        >>> mesh['scalars'] = mesh.points[:, 1]
+        >>> pl = pv.Plotter()
+        >>> _ = pl.add_volume(mesh, opacity_unit_distance=0.1)
+        >>> pl.show()
+
         """
         # Handle default arguments
 
@@ -3775,6 +3841,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
             culling = 'backface'
 
         if mapper is None:
+            # Default mapper choice. Overridden later if UnstructuredGrid
             mapper = self._theme.volume_mapper
 
         # only render when the plotter has already been shown
@@ -3857,16 +3924,38 @@ class BasePlotter(PickingHelper, WidgetHelper):
                 actors.append(a)
             return actors
 
-        if not isinstance(volume, (pyvista.UniformGrid, pyvista.RectilinearGrid)):
+        # Make sure structured grids are not less than 3D
+        # ImageData and RectilinearGrid should be olay as <3D
+        if isinstance(volume, pyvista.StructuredGrid):
+            if any(d < 2 for d in volume.dimensions):
+                raise ValueError('StructuredGrids must be 3D dimensional.')
+
+        if isinstance(volume, pyvista.PolyData):
             raise TypeError(
-                f'Type {type(volume)} not supported for volume rendering at this time. Use `pyvista.UniformGrid` or `pyvista.RectilinearGrid`.'
+                f'Type {type(volume)} not supported for volume rendering as it is not 3D.'
             )
+        elif not isinstance(
+            volume, (pyvista.UniformGrid, pyvista.RectilinearGrid, pyvista.UnstructuredGrid)
+        ):
+            volume = volume.cast_to_unstructured_grid()
+
+        # Override mapper choice for UnstructuredGrid
+        if isinstance(volume, pyvista.UnstructuredGrid):
+            # Unstructured grid must be all tetrahedrals
+            if not (volume.celltypes == pyvista.celltype.CellType.TETRA).all():
+                volume = volume.triangulate()
+            mapper = 'ugrid'
+
         if mapper == 'fixed_point' and not isinstance(volume, pyvista.UniformGrid):
             raise TypeError(
                 f'Type {type(volume)} not supported for volume rendering with the `"fixed_point"` mapper. Use `pyvista.UniformGrid`.'
             )
+        elif isinstance(volume, pyvista.UnstructuredGrid) and mapper != 'ugrid':
+            raise TypeError(
+                f'Type {type(volume)} not supported for volume rendering with the `{mapper}` mapper. Use the "ugrid" mapper or simply leave as None.'
+            )
 
-        if opacity_unit_distance is None:
+        if opacity_unit_distance is None and not isinstance(volume, pyvista.UnstructuredGrid):
             opacity_unit_distance = volume.length / (np.mean(volume.dimensions) - 1)
 
         if scalars is None:
@@ -3914,12 +4003,13 @@ class BasePlotter(PickingHelper, WidgetHelper):
             'gpu': GPUVolumeRayCastMapper,
             'open_gl': OpenGLGPUVolumeRayCastMapper,
             'smart': SmartVolumeMapper,
+            'ugrid': UnstructuredGridVolumeRayCastMapper,
         }
         if not isinstance(mapper, str) or mapper not in mappers_lookup.keys():
             raise TypeError(
                 f"Mapper ({mapper}) unknown. Available volume mappers include: {', '.join(mappers_lookup.keys())}"
             )
-        self.mapper = mappers_lookup[mapper](self._theme)
+        self.mapper = mappers_lookup[mapper](theme=self._theme)
 
         # Set scalars range
         min_, max_ = None, None
@@ -4126,7 +4216,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
             alg.SetFeatureAngle(feature_angle)
         else:
             alg.SetEnableFeatureAngle(False)
-        mapper = DataSetMapper()
+        mapper = DataSetMapper(theme=self._theme)
         mapper.SetInputConnection(alg.GetOutputPort())
         actor, prop = self.add_actor(mapper)
         prop.SetColor(Color(color).float_rgb)
@@ -4256,18 +4346,18 @@ class BasePlotter(PickingHelper, WidgetHelper):
         """
         if isinstance(views, (int, np.integer)):
             camera = self.renderers[views].camera
-            camera_status = self.renderers[views].camera_set
+            camera_status = self.renderers[views].camera.is_set
             for renderer in self.renderers:
                 renderer.camera = camera
-                renderer.camera_set = camera_status
+                renderer.camera.is_set = camera_status
             return
         views = np.asarray(views)
         if np.issubdtype(views.dtype, np.integer):
             camera = self.renderers[views[0]].camera
-            camera_status = self.renderers[views[0]].camera_set
+            camera_status = self.renderers[views[0]].camera.is_set
             for view_index in views:
                 self.renderers[view_index].camera = camera
-                self.renderers[view_index].camera_set = camera_status
+                self.renderers[view_index].camera.is_set = camera_status
         else:
             raise TypeError(f'Expected type is int, list or tuple: {type(views)} is given')
 
@@ -4286,11 +4376,11 @@ class BasePlotter(PickingHelper, WidgetHelper):
             for renderer in self.renderers:
                 renderer.camera = Camera()
                 renderer.reset_camera()
-                renderer.camera_set = False
+                renderer.camera.is_set = False
         elif isinstance(views, int):
             self.renderers[views].camera = Camera()
             self.renderers[views].reset_camera()
-            self.renderers[views].camera_set = False
+            self.renderers[views].camera.is_set = False
         elif isinstance(views, collections.abc.Iterable):
             for view_index in views:
                 self.renderers[view_index].camera = Camera()
@@ -4931,7 +5021,7 @@ class BasePlotter(PickingHelper, WidgetHelper):
         shadow=False,
         show_points=True,
         point_color=None,
-        point_size=5,
+        point_size=None,
         name=None,
         shape_color='grey',
         shape='rounded_rect',
@@ -5851,19 +5941,17 @@ class BasePlotter(PickingHelper, WidgetHelper):
         # will not be rendered
         self.renderer.layer = 0
 
-    def _on_first_render_request(self, cpos=None):
+    def _on_first_render_request(self):
         """Once an image or render is officially requested, run this routine.
 
         For example on the show call or any screenshot producing code.
         """
         # reset unless camera for the first render unless camera is set
-        if self._first_time:  # and not self.camera_set:
+        if self._first_time:
             for renderer in self.renderers:
-                if not renderer.camera_set and cpos is None:
+                if not renderer.camera.is_set:
                     renderer.camera_position = renderer.get_default_cam_pos()
                     renderer.ResetCamera()
-                elif cpos is not None:
-                    renderer.camera_position = cpos
             self._first_time = False
 
     def reset_camera_clipping_range(self):
@@ -6406,7 +6494,8 @@ class Plotter(BasePlotter):
             self.render_window.SetSize(window_size[0], window_size[1])
 
         # reset unless camera for the first render unless camera is set
-        self._on_first_render_request(cpos)
+        self.camera_position = cpos
+        self._on_first_render_request()
 
         # handle plotter notebook
         if jupyter_backend and not self.notebook:
@@ -6449,7 +6538,6 @@ class Plotter(BasePlotter):
                 log.debug('Starting iren')
                 self.iren.update_style()
                 if not interactive_update:
-
                     # Resolves #1260
                     if os.name == 'nt':
                         if _vtk.VTK9:
@@ -6632,7 +6720,7 @@ class Plotter(BasePlotter):
         alg.SetModelBounds(bounds)
         alg.SetFocalPoint(focal_point)
         alg.AllOn()
-        mapper = DataSetMapper()
+        mapper = DataSetMapper(theme=self._theme)
         mapper.SetInputConnection(alg.GetOutputPort())
         actor, prop = self.add_actor(mapper)
         prop.SetColor(Color(color).float_rgb)

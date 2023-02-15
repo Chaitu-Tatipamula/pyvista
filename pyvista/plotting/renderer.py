@@ -1,7 +1,7 @@
 """Module containing pyvista implementation of vtkRenderer."""
 
 import collections.abc
-from functools import partial
+from functools import partial, wraps
 from typing import Sequence, cast
 import warnings
 
@@ -208,7 +208,6 @@ class Renderer(_vtk.vtkOpenGLRenderer):
         self._actors = {}
         self.parent = parent  # weakref.proxy to the plotter from Renderers
         self._theme = parent.theme
-        self.camera_set = False
         self.bounding_box_actor = None
         self.scale = [1.0, 1.0, 1.0]
         self.AutomaticLightCreationOff()
@@ -236,6 +235,17 @@ class Renderer(_vtk.vtkOpenGLRenderer):
             self.add_border(border_color, border_width)
 
         self.set_color_cycler(self._theme.color_cycler)
+
+    @property
+    def camera_set(self) -> bool:
+        """Get or set whether this camera has been configured."""
+        if self.camera is None:  # pragma: no cover
+            return False
+        return self.camera.is_set
+
+    @camera_set.setter
+    def camera_set(self, is_set: bool):
+        self.camera.is_set = is_set
 
     def set_color_cycler(self, color_cycler):
         """Set or reset this renderer's color cycler.
@@ -293,7 +303,7 @@ class Renderer(_vtk.vtkOpenGLRenderer):
         # lazy instantiation here to avoid creating the charts object unless needed.
         if self.__charts is None:
             self.__charts = Charts(self)
-            self.AddObserver("StartEvent", partial(try_callback, self._render_event))
+            self.AddObserver("StartEvent", partial(try_callback, self._before_render_event))
         return self.__charts
 
     @property
@@ -446,7 +456,7 @@ class Renderer(_vtk.vtkOpenGLRenderer):
         self.set_background(color)
         self.Modified()
 
-    def _render_event(self, *args, **kwargs):
+    def _before_render_event(self, *args, **kwargs):
         """Notify all charts about render event."""
         for chart in self._charts:
             chart._render_event(*args, **kwargs)
@@ -607,10 +617,10 @@ class Renderer(_vtk.vtkOpenGLRenderer):
 
         Parameters
         ----------
-        chart : Chart2D, ChartBox, ChartPie or ChartMPL
+        chart : Chart
             Chart to add to renderer.
 
-        *charts : Chart2D, ChartBox, ChartPie or ChartMPL
+        *charts : Chart
             Charts to add to renderer.
 
         Examples
@@ -631,12 +641,29 @@ class Renderer(_vtk.vtkOpenGLRenderer):
             )
         self._charts.add_chart(chart, *charts)
 
+    @property
+    def has_charts(self):
+        """Return whether this renderer has charts."""
+        return self.__charts is not None
+
+    @wraps(Charts.set_interaction)
+    def set_chart_interaction(self, interactive, toggle=False):
+        """Wrap ``Charts.set_interaction``."""
+        # Make sure we don't create the __charts object if this renderer has no charts yet.
+        return self._charts.set_interaction(interactive, toggle) if self.has_charts else []
+
+    @wraps(Charts.get_charts_by_pos)
+    def _get_charts_by_pos(self, pos):
+        """Wrap ``Charts.get_charts_by_pos``."""
+        # Make sure we don't create the __charts object if this renderer has no charts yet.
+        return self._charts.get_charts_by_pos(pos) if self.has_charts else []
+
     def remove_chart(self, chart_or_index):
         """Remove a chart from this renderer.
 
         Parameters
         ----------
-        chart_or_index : Chart2D, ChartBox, ChartPie, ChartMPL or int
+        chart_or_index : Chart or int
             Either the chart to remove from this renderer or its index in the collection of charts.
 
         Examples
@@ -671,7 +698,9 @@ class Renderer(_vtk.vtkOpenGLRenderer):
         >>> pl.show()
 
         """
-        self._charts.remove_chart(chart_or_index)
+        # Make sure we don't create the __charts object if this renderer has no charts yet.
+        if self.has_charts:
+            self._charts.remove_chart(chart_or_index)
 
     @property
     def actors(self):
@@ -751,6 +780,9 @@ class Renderer(_vtk.vtkOpenGLRenderer):
                 name = actor.GetAddressAsString("")
 
         actor.SetPickable(pickable)
+        # Apply this renderer's scale to the actor (which can be further scaled)
+        if hasattr(actor, 'SetScale'):
+            actor.SetScale(np.array(actor.GetScale()) * np.array(self.scale))
         self.AddActor(actor)  # must add actor before resetting camera
         self._actors[name] = actor
 
@@ -1485,13 +1517,10 @@ class Renderer(_vtk.vtkOpenGLRenderer):
         # set font
         font_family = parse_font_family(font_family)
 
-        if use_3d_text and not np.allclose(self.scale, use_3d_text):  # pragma: no cover
-            warnings.warn(
-                'Using 2D actors for text due to scaling != (1, 1, 1)\n\n'
-                'Either disable scaling or set use_3d_text=False'
-            )
-
-        if use_3d_text:
+        if not use_3d_text or not np.allclose(self.scale, [1.0, 1.0, 1.0]):
+            use_3d_text = False
+            cube_axes_actor.SetUseTextActor3D(False)
+        else:
             cube_axes_actor.SetUseTextActor3D(True)
 
         props = [
@@ -2271,10 +2300,16 @@ class Renderer(_vtk.vtkOpenGLRenderer):
         return True
 
     def set_scale(self, xscale=None, yscale=None, zscale=None, reset_camera=True):
-        """Scale all the datasets in the scene.
+        """Scale all the actors in the scene.
 
         Scaling in performed independently on the X, Y and Z axis.
         A scale of zero is illegal and will be replaced with one.
+
+        .. warning::
+            Setting the scale on the renderer is a convenience method to
+            individually scale each of the actors in the scene. If a scale
+            was set on an actor previously, it will be reset to the scale
+            of this Renderer.
 
         Parameters
         ----------
@@ -2295,12 +2330,12 @@ class Renderer(_vtk.vtkOpenGLRenderer):
 
         Examples
         --------
-        Set the scale in the z direction to be 5 times that of
+        Set the scale in the z direction to be 2 times that of
         nominal.  Leave the other axes unscaled.
 
         >>> import pyvista
         >>> pl = pyvista.Plotter()
-        >>> pl.set_scale(zscale=5)
+        >>> pl.set_scale(zscale=2)
         >>> _ = pl.add_mesh(pyvista.Sphere())  # perfect sphere
         >>> pl.show()
 
@@ -2313,9 +2348,11 @@ class Renderer(_vtk.vtkOpenGLRenderer):
             zscale = self.scale[2]
         self.scale = [xscale, yscale, zscale]
 
-        # Update the camera's coordinate system
-        transform = np.diag([xscale, yscale, zscale, 1.0])
-        self.camera.model_transform_matrix = transform
+        # Reset all actors to match this scale
+        for actor in self.actors.values():
+            if hasattr(actor, 'SetScale'):
+                actor.SetScale(self.scale)
+
         self.parent.render()
         if reset_camera:
             self.update_bounds_axes()
@@ -2977,7 +3014,7 @@ class Renderer(_vtk.vtkOpenGLRenderer):
         """Notify renderer components of explicit plotter render call."""
         if self.__charts is not None:
             for chart in self.__charts:
-                # Notify ChartMPLs to redraw themselves when plotter.render() is called
+                # Notify Charts that plotter.render() is called
                 chart._render_event(plotter_render=True)
 
     def deep_clean(self, render=False):
@@ -2996,11 +3033,14 @@ class Renderer(_vtk.vtkOpenGLRenderer):
             del self.edl_pass
         if hasattr(self, '_box_object'):
             self.remove_bounding_box(render=render)
-        if self._shadow_pass is not None:
+        if hasattr(self, '_shadow_pass') and self._shadow_pass is not None:
             self.disable_shadows()
-        if self.__charts is not None:
-            self.__charts.deep_clean()
-            self.__charts = None
+        try:
+            if self.__charts is not None:
+                self.__charts.deep_clean()
+                self.__charts = None
+        except AttributeError:  # pragma: no cover
+            pass
 
         self._render_passes.deep_clean()
         self.remove_floors(render=render)
@@ -3201,7 +3241,6 @@ class Renderer(_vtk.vtkOpenGLRenderer):
 
             self._legend.SetNumberOfEntries(len(self._labels))
             for i, (vtk_object, text, color) in enumerate(self._labels.values()):
-
                 if face is None:
                     # dummy vtk object
                     vtk_object = pyvista.PolyData([0.0, 0.0, 0.0])

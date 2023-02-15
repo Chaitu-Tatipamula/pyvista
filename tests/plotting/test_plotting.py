@@ -24,7 +24,7 @@ from pyvista._vtk import VTK9
 from pyvista.core.errors import DeprecationError
 from pyvista.plotting import system_supports_plotting
 from pyvista.plotting.colors import matplotlib_default_colors
-from pyvista.plotting.opts import RepresentationOpts, ShaderOpts
+from pyvista.plotting.opts import InterpolationType, RepresentationType
 from pyvista.plotting.plotting import SUPPORTED_FORMATS
 from pyvista.utilities import algorithms
 from pyvista.utilities.misc import PyVistaDeprecationWarning, can_create_mpl_figure
@@ -327,6 +327,38 @@ def test_plot_helper_two_volumes(uniform, verify_image_cache):
         volume=True,
         show_scalar_bar=False,
     )
+
+
+def test_plot_volume_ugrid(verify_image_cache):
+    verify_image_cache.windows_skip_image_cache = True
+
+    # Handle UnsutructuredGrid directly
+    grid = examples.load_hexbeam()
+    pl = pyvista.Plotter()
+    pl.add_volume(grid, scalars='sample_point_scalars')
+    pl.show()
+
+    # Handle 3D structured grid
+    grid = examples.load_uniform().cast_to_structured_grid()
+    pl = pyvista.Plotter()
+    pl.add_volume(grid, scalars='Spatial Point Data')
+    pl.show()
+
+    # Make sure PolyData fails
+    mesh = pyvista.Sphere()
+    mesh['scalars'] = mesh.points[:, 1]
+    pl = pyvista.Plotter()
+    with pytest.raises(TypeError):
+        pl.add_volume(mesh, scalars='scalars')
+    pl.close()
+
+    # Make sure 2D StructuredGrid fails
+    mesh = examples.load_structured()  # wavy surface
+    mesh['scalars'] = mesh.points[:, 1]
+    pl = pyvista.Plotter()
+    with pytest.raises(ValueError):
+        pl.add_volume(mesh, scalars='scalars')
+    pl.close()
 
 
 def test_plot_return_cpos(sphere):
@@ -687,14 +719,22 @@ def test_plot_silhouette_options(tri_cylinder):
 def test_plotter_scale(sphere):
     plotter = pyvista.Plotter()
     plotter.add_mesh(sphere)
-    plotter.set_scale(10, 10, 10)
-    assert plotter.scale == [10, 10, 10]
+    plotter.set_scale(10, 10, 15)
+    assert plotter.scale == [10, 10, 15]
+    plotter.show()
+
+    plotter = pyvista.Plotter()
+    plotter.add_mesh(sphere)
     plotter.set_scale(5.0)
     plotter.set_scale(yscale=6.0)
     plotter.set_scale(zscale=9.0)
     assert plotter.scale == [5.0, 6.0, 9.0]
+    plotter.show()
+
+    plotter = pyvista.Plotter()
     plotter.scale = [1.0, 4.0, 2.0]
     assert plotter.scale == [1.0, 4.0, 2.0]
+    plotter.add_mesh(sphere)
     plotter.show()
 
 
@@ -1388,7 +1428,6 @@ def test_multi_renderers():
 
 
 def test_multi_renderers_subplot_ind_2x1():
-
     # Test subplot indices (2 rows by 1 column)
     plotter = pyvista.Plotter(shape=(2, 1))
     # First row
@@ -1542,6 +1581,15 @@ def test_link_views_camera_set(sphere, verify_image_cache):
     p.unlink_views()
     for renderer in p.renderers:
         assert not renderer.camera_set
+    p.show()
+
+    wavelet = pyvista.Wavelet().clip('x')
+    p = pyvista.Plotter(shape=(1, 2))
+    p.add_mesh(wavelet, color='red')
+    p.subplot(0, 1)
+    p.add_mesh(wavelet, color='red')
+    p.link_views()
+    p.camera_position = [(55.0, 16, 31), (-5.0, 0.0, 0.0), (-0.22, 0.97, -0.09)]
     p.show()
 
 
@@ -2289,7 +2337,7 @@ def test_chart_plot():
     # Chart 2 (bottom right)
     chart_br = pyvista.Chart2D(size=(0.4, 0.4), loc=(0.55, 0.05))
     chart_br.background_texture = examples.load_globe_texture()
-    chart_br.border_color = "r"
+    chart_br.active_border_color = "r"
     chart_br.border_width = 5
     chart_br.border_style = "-."
     chart_br.hide_axes()
@@ -2300,7 +2348,7 @@ def test_chart_plot():
 
     # Chart 3 (top left)
     chart_tl = pyvista.Chart2D(size=(0.4, 0.4), loc=(0.05, 0.55))
-    chart_tl.background_color = (0.8, 0.8, 0.2)
+    chart_tl.active_background_color = (0.8, 0.8, 0.2)
     chart_tl.title = "Exponential growth"
     chart_tl.x_label = "X axis"
     chart_tl.y_label = "Y axis"
@@ -2329,6 +2377,7 @@ def test_chart_plot():
     pl.background_color = 'w'
     pl.add_chart(chart_bl, chart_br, chart_tl, chart_tr, hidden_chart, removed_chart)
     pl.remove_chart(removed_chart)
+    pl.set_chart_interaction([chart_br, chart_tl])
     pl.show()
 
 
@@ -2934,12 +2983,12 @@ def test_bool_scalars(sphere):
 
 @skip_windows  # because of pbr
 @skip_9_1_0  # pbr required
-def test_property(verify_image_cache):
+def test_property_pbr(verify_image_cache):
     verify_image_cache.macos_skip_image_cache = True
     prop = pyvista.Property(interpolation='pbr', metallic=1.0)
 
     # VTK flipped the Z axis for the cubemap between 9.1 and 9.2
-    verify_image_cache.skip = pyvista.vtk_version_info > (9, 2)
+    verify_image_cache.skip = pyvista.vtk_version_info < (9, 2)
     prop.plot()
 
 
@@ -3531,8 +3580,8 @@ def test_axes_actor_properties():
     assert axes_actor.x_axis_tip_properties.anisotropy_rotation == 0.4
     axes_actor.y_axis_tip_properties.lighting = False
     assert not axes_actor.y_axis_tip_properties.lighting
-    axes_actor.z_axis_tip_properties.interpolation_model = ShaderOpts.PHONG
-    assert axes_actor.z_axis_tip_properties.interpolation_model == ShaderOpts.PHONG
+    axes_actor.z_axis_tip_properties.interpolation_model = InterpolationType.PHONG
+    assert axes_actor.z_axis_tip_properties.interpolation_model == InterpolationType.PHONG
 
     axes_actor.x_axis_shaft_properties.index_of_refraction = 1.5
     assert axes_actor.x_axis_shaft_properties.index_of_refraction == 1.5
@@ -3541,8 +3590,8 @@ def test_axes_actor_properties():
     axes_actor.z_axis_shaft_properties.shading = False
     assert not axes_actor.z_axis_shaft_properties.shading
 
-    axes_actor.x_axis_tip_properties.representation = RepresentationOpts.POINTS
-    assert axes_actor.x_axis_tip_properties.representation == RepresentationOpts.POINTS
+    axes_actor.x_axis_tip_properties.representation = RepresentationType.POINTS
+    assert axes_actor.x_axis_tip_properties.representation == RepresentationType.POINTS
 
     axes.axes_actor.shaft_type = pyvista.AxesActor.ShaftType.CYLINDER
     pl = pyvista.Plotter()

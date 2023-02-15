@@ -4,10 +4,15 @@ import logging
 import os
 import warnings
 
-from ipywidgets import widgets
 from trame.app import get_server
 from trame.ui.vuetify import VAppLayout
 from trame.widgets import html as html_widgets, vtk as vtk_widgets, vuetify as vuetify_widgets
+
+try:
+    from ipywidgets.widgets import HTML
+except ImportError:
+    HTML = object
+
 
 import pyvista
 from pyvista.trame.ui import UI_TITLE, get_or_create_viewer
@@ -21,7 +26,7 @@ with PyVista.
 You can use the following snippet to launch the server:
 
     from pyvista.trame.jupyter import launch_server
-    await launch_server('{name}')
+    await launch_server('{name}').ready
 
 """
 JUPYTER_SERVER_DOWN_MESSAGE = """Trame server has not launched.
@@ -58,11 +63,13 @@ class TrameJupyterServerDownError(RuntimeError):
         super().__init__(JUPYTER_SERVER_DOWN_MESSAGE)
 
 
-class Widget(widgets.HTML):
+class Widget(HTML):
     """Custom HTML iframe widget for trame viewer."""
 
     def __init__(self, viewer, src, width, height, **kwargs):
         """Initialize."""
+        if HTML is object:
+            raise ImportError('Please install `ipywidgets`.')
         value = f"<iframe src='{src}' style='width: {width}; height: {height};'></iframe>"
         super().__init__(value, **kwargs)
         self._viewer = viewer
@@ -79,7 +86,7 @@ class Widget(widgets.HTML):
         return self._src
 
 
-def launch_server(server=None):
+def launch_server(server=None, port=None, host=None):
     """Launch a trame server for use with Jupyter.
 
     Parameters
@@ -92,24 +99,35 @@ def launch_server(server=None):
         If a server name is given and such server is not available yet, it will
         be created otherwise the previously created instance will be returned.
 
-        Server will run on to ``127.0.0.1`` unless user sets the environment
-        variable ``TRAME_DEFAULT_HOST``.
+    port : int, optional
+        The port on which to bind the server. Defaults to 0 to automatically
+        find an available port.
+
+    host : str, optional
+        The host name to bind the server to on launch. Server will bind to
+        ``127.0.0.1`` by default unless user sets the environment variable ``TRAME_DEFAULT_HOST``.
 
     Returns
     -------
     trame_server.core.Server
-        Trame server.
+        The launched Trame server. To ``await`` the launch, use the
+        ``.ready`` future attribute on the server.
 
     """
     if server is None:
         server = pyvista.global_theme.trame.jupyter_server_name
     if isinstance(server, str):
         server = get_server(server)
+    if port is None:
+        port = pyvista.global_theme.trame.jupyter_server_port
+    if host is None:
+        # Default to `127.0.0.1` unless user sets TRAME_DEFAULT_HOST
+        host = os.environ.get('TRAME_DEFAULT_HOST', '127.0.0.1')
 
     # Disable serializer errors/warnings for a cleaner output in Jupyter
     # Do this on server launch and not at top level so that it only happens
     # in Jupyter
-    if os.environ.get('VTK_DISABLE_SERIALIZER_LOGGER', 'true').lower() == 'true':
+    if not pyvista.global_theme.trame.enable_vtk_warnings:
         vtk_logger = logging.getLogger("vtkmodules.web.render_window_serializer")
         vtk_logger.disabled = True
 
@@ -125,16 +143,15 @@ def launch_server(server=None):
         server.controller.on_server_ready.add(on_ready)
         server.start(
             exec_mode='task',
-            # Default to `127.0.0.1` unless user sets TRAME_DEFAULT_HOST
-            host=os.environ.get('TRAME_DEFAULT_HOST', '127.0.0.1'),
-            port=0,
+            host=host,
+            port=port,
             open_browser=False,
             show_connection_info=False,
             disable_logging=True,
             timeout=0,
         )
-    # else, server is already running
-    return server.ready
+    # else, server is already running or launching
+    return server
 
 
 def build_url(
@@ -314,29 +331,19 @@ def show_trame(
     return Widget(viewer, src, **kwargs)
 
 
-def elegantly_launch(server):
+def elegantly_launch(*args, **kwargs):
     """Elegantly launch the Trame server without await.
 
     This provides a mechanism to launch the Trame Jupyter backend in
     a way that does not require users to await the call.
 
-    Parameters
-    ----------
-    server : str, optional
-        By default this uses :attr:`pyvista.global_theme.trame.jupyter_server_name
-        <pyvista.themes._TrameConfig.jupyter_server_name>`, which by default is
-        set to ``'pyvista-jupyter'``.
-
-        If a server name is given and such server is not available yet, it will
-        be created. Otherwise, the previously created instance will be returned.
-
-        Server will run on to ``127.0.0.1`` unless you set the environment
-        variable ``TRAME_DEFAULT_HOST``.
+    This is a thin wrapper of
+    :func:`launch_server() <pyvista.trame.jupyter.launch_server>`.
 
     Returns
     -------
     trame_server.core.Server
-        Trame server.
+        The launched trame server.
 
     Warnings
     --------
@@ -353,12 +360,12 @@ def elegantly_launch(server):
             """Please install `nest_asyncio` to automagically launch the trame server without await. Or, to avoid `nest_asynctio` run:
 
     from pyvista.trame.jupyter import launch_server
-    await launch_server()
+    await launch_server().ready
 """
         )
 
     async def launch_it():
-        await launch_server(server)
+        await launch_server(*args, **kwargs).ready
 
     # Basically monkey patches asyncio to support this
     nest_asyncio.apply()

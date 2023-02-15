@@ -27,11 +27,21 @@ from .tools import normalize
 class _BaseMapper(_vtk.vtkAbstractMapper):
     """Base Mapper with methods common to other mappers."""
 
-    _theme = None
+    _new_attr_exceptions = ('_theme',)
 
     def __init__(self, theme=None, **kwargs):
-        self._theme = theme
+        self._theme = pv.themes.DefaultTheme()
+        if theme is None:
+            # copy global theme to ensure local property theme is fixed
+            # after creation.
+            self._theme.load_theme(pv.global_theme)
+        else:
+            self._theme.load_theme(theme)
         self.lookup_table = LookupTable()
+
+        self.interpolate_before_map = kwargs.get(
+            'interpolate_before_map', self._theme.interpolate_before_map
+        )
 
     @property
     def bounds(self) -> BoundsLike:
@@ -62,7 +72,7 @@ class _BaseMapper(_vtk.vtkAbstractMapper):
         >>> mapper_copy = mapper.copy()
 
         """
-        new_mapper = type(self)()
+        new_mapper = type(self)(theme=self._theme)
         # even though this uses ShallowCopy, the new mapper no longer retains
         # any connection with the original
         new_mapper.ShallowCopy(self)
@@ -586,7 +596,6 @@ class DataSetMapper(_vtk.vtkDataSetMapper, _BaseMapper):
             scalars_name = '__custom_rgba'
 
         if not np.issubdtype(scalars.dtype, np.number) and not isinstance(cmap, pv.LookupTable):
-
             # we can rapidly handle bools
             if scalars.dtype == np.bool_:
                 cats = np.array([b'False', b'True'], dtype='|S5')
@@ -801,6 +810,13 @@ class DataSetMapper(_vtk.vtkDataSetMapper, _BaseMapper):
 class PointGaussianMapper(_vtk.vtkPointGaussianMapper, DataSetMapper):
     """Wrap vtkPointGaussianMapper."""
 
+    def __init__(self, theme=None, emissive=None, scale_factor=1.0) -> None:
+        super().__init__(theme=theme)
+        if emissive is None:
+            emissive = self._theme.lighting_params.emissive
+        self.emissive = emissive
+        self.scale_factor = scale_factor
+
     @property
     def emissive(self) -> bool:
         """Set or return emissive.
@@ -888,6 +904,15 @@ class _BaseVolumeMapper(_BaseMapper):
         super().__init__(theme=theme)
         self._lut = LookupTable()
         self._scalar_range = (0.0, 256.0)
+
+    @property
+    def interpolate_before_map(self):
+        """Interpolate before map is not supported with volume mappers."""
+        return None
+
+    @interpolate_before_map.setter
+    def interpolate_before_map(self, *args):
+        pass
 
     @property
     def dataset(self):
@@ -1002,5 +1027,13 @@ class OpenGLGPUVolumeRayCastMapper(_vtk.vtkOpenGLGPUVolumeRayCastMapper, _BaseVo
 
 class SmartVolumeMapper(_vtk.vtkSmartVolumeMapper, _BaseVolumeMapper):
     """Wrap _vtk.vtkSmartVolumeMapper."""
+
+    pass
+
+
+class UnstructuredGridVolumeRayCastMapper(
+    _vtk.vtkUnstructuredGridVolumeRayCastMapper, _BaseVolumeMapper
+):
+    """Wrap _vtk.vtkUnstructuredGridVolumeMapper."""
 
     pass
